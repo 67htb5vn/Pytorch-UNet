@@ -21,19 +21,22 @@ def _normalize_mask_values(mask_values):
     return [int(mask_values)]
 
 
-def load_image(filename):
+def load_image(filename, is_mask=False):
     ext = splitext(filename)[1]
     if ext == '.npy':
         return Image.fromarray(np.load(filename))
     elif ext in ['.pt', '.pth']:
         return Image.fromarray(torch.load(filename).numpy())
     else:
-        return Image.open(filename).convert("RGB")
+        image = Image.open(filename)
+        if is_mask:
+            return image.convert("L")
+        return image.convert("RGB")
 
 
 def unique_mask_values(idx, mask_dir, mask_suffix):
     mask_file = list(mask_dir.glob(idx + mask_suffix + '.*'))[0]
-    mask = np.asarray(load_image(mask_file))
+    mask = np.asarray(load_image(mask_file, is_mask=True))
     if mask.ndim == 2:
         return np.unique(mask)
     elif mask.ndim == 3:
@@ -160,8 +163,8 @@ class BasicDataset(Dataset):
         if img_file is None or mask_file is None:
             raise FileNotFoundError(f'No valid image/mask pair found for the ID {name}')
 
-        mask = load_image(mask_file)
-        img = load_image(img_file)
+        mask = load_image(mask_file, is_mask=True)
+        img = load_image(img_file, is_mask=False)
 
         assert img.size == mask.size, \
             f'Image and mask {name} should be the same size, but are {img.size} and {mask.size}'
