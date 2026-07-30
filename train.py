@@ -148,7 +148,9 @@ def train_model(
                         loss += dice_loss(
                             probabilities[:, 1:],
                             targets[:, 1:],
-                            multiclass=False
+                            # Keep the channel dimension ([B, 1, H, W]); the
+                            # multiclass helper safely flattens B and C first.
+                            multiclass=True
                         )
 
                 optimizer.zero_grad(set_to_none=True)
