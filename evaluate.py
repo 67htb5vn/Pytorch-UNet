@@ -2,39 +2,55 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from utils.dice_score import multiclass_dice_coeff, dice_coeff
+from utils.dice_score import dice_loss
 
 
 @torch.inference_mode()
-def evaluate(net, dataloader, device, amp):
+def evaluate(net, dataloader, device, amp, class_weights=None):
+    """Return dataset-level foreground metrics and the validation objective."""
     net.eval()
-    num_val_batches = len(dataloader)
-    dice_score = 0
+    loss_sum = 0.0
+    pixel_count = 0
+    intersection = 0
+    predicted_positive = 0
+    true_positive = 0
 
-    # iterate over the validation set
     with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
-        for batch in tqdm(dataloader, total=num_val_batches, desc='Validation round', unit='batch', leave=False):
-            image, mask_true = batch['image'], batch['mask']
-
-            # move images and labels to correct device and type
-            image = image.to(device=device, dtype=torch.float32, memory_format=torch.channels_last)
-            mask_true = mask_true.to(device=device, dtype=torch.long)
-
-            # predict the mask
-            mask_pred = net(image)
+        for batch in tqdm(dataloader, total=len(dataloader), desc='Validation round', unit='batch', leave=False):
+            image = batch['image'].to(device=device, dtype=torch.float32, memory_format=torch.channels_last)
+            mask_true = batch['mask'].to(device=device, dtype=torch.long)
+            logits = net(image)
 
             if net.n_classes == 1:
-                assert mask_true.min() >= 0 and mask_true.max() <= 1, 'True mask indices should be in [0, 1]'
-                mask_pred = (F.sigmoid(mask_pred) > 0.5).float()
-                # compute the Dice score
-                dice_score += dice_coeff(mask_pred, mask_true, reduce_batch_first=False)
+                target = mask_true.float()
+                probabilities = torch.sigmoid(logits.squeeze(1))
+                loss = F.binary_cross_entropy_with_logits(logits.squeeze(1), target)
+                loss += dice_loss(probabilities, target, multiclass=False)
+                prediction = probabilities > 0.5
+                target_bool = target.bool()
             else:
-                assert mask_true.min() >= 0 and mask_true.max() < net.n_classes, 'True mask indices should be in [0, n_classes['
-                # convert to one-hot format
-                mask_true = F.one_hot(mask_true, net.n_classes).permute(0, 3, 1, 2).float()
-                mask_pred = F.one_hot(mask_pred.argmax(dim=1), net.n_classes).permute(0, 3, 1, 2).float()
-                # compute the Dice score, ignoring background
-                dice_score += multiclass_dice_coeff(mask_pred[:, 1:], mask_true[:, 1:], reduce_batch_first=False)
+                probabilities = F.softmax(logits, dim=1).float()
+                target_one_hot = F.one_hot(mask_true, net.n_classes).permute(0, 3, 1, 2).float()
+                loss = F.cross_entropy(logits, mask_true, weight=class_weights)
+                loss += dice_loss(probabilities[:, 1:], target_one_hot[:, 1:], multiclass=True)
+                prediction = logits.argmax(dim=1) == 1
+                target_bool = mask_true == 1
 
+            batch_pixels = mask_true.numel()
+            loss_sum += loss.item() * batch_pixels
+            pixel_count += batch_pixels
+            intersection += (prediction & target_bool).sum().item()
+            predicted_positive += prediction.sum().item()
+            true_positive += target_bool.sum().item()
+
+    # Dataset-level (micro) Dice is stable even when some validation images have no lesion.
+    dice = (2.0 * intersection + 1e-6) / (predicted_positive + true_positive + 1e-6)
+    precision = (intersection + 1e-6) / (predicted_positive + 1e-6)
+    recall = (intersection + 1e-6) / (true_positive + 1e-6)
     net.train()
-    return dice_score / max(num_val_batches, 1)
+    return {
+        'loss': loss_sum / max(pixel_count, 1),
+        'dice': dice,
+        'precision': precision,
+        'recall': recall,
+    }

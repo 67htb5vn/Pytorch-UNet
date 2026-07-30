@@ -37,7 +37,7 @@ def train_model(
         weight_decay: float = 1e-8,
         momentum: float = 0.999,
         gradient_clipping: float = 1.0,
-        patience: int = 5,
+        patience: int = 15,
         min_delta: float = 1e-4,
         foreground_weight: float = 0.0,
 ):
@@ -80,7 +80,10 @@ def train_model(
                 'No foreground pixels were found in the training masks. '
                 'Check mask paths and values (for example 0/255 versus 0/1).'
             )
-        auto_weight = min(50.0, max(1.0, (1.0 - foreground_ratio) / foreground_ratio))
+        # A full inverse-frequency weight (45.6 here) often over-predicts tiny
+        # structures.  The square-root weight is a less aggressive default;
+        # Dice loss still supplies a direct foreground-learning signal.
+        auto_weight = min(10.0, max(1.0, ((1.0 - foreground_ratio) / foreground_ratio) ** 0.5))
         fg_weight = foreground_weight if foreground_weight > 0 else auto_weight
         class_weights = torch.tensor([1.0, fg_weight], device=device)
         logging.info(
@@ -110,7 +113,7 @@ def train_model(
     # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
     optimizer = optim.RMSprop(model.parameters(),
                               lr=learning_rate, weight_decay=weight_decay, momentum=momentum, foreach=True)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=4, factor=0.5)  # goal: maximize Dice score
     grad_scaler = torch.amp.GradScaler(device.type, enabled=amp)
     criterion = nn.CrossEntropyLoss(weight=class_weights) if model.n_classes > 1 else nn.BCEWithLogitsLoss()
     global_step = 0
@@ -122,6 +125,9 @@ def train_model(
     for epoch in range(1, epochs + 1):
         model.train()
         epoch_loss = 0
+        train_intersection = 0
+        train_predicted_positive = 0
+        train_true_positive = 0
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
                 images, true_masks = batch['image'], batch['mask']
@@ -163,6 +169,15 @@ def train_model(
                 pbar.update(images.shape[0])
                 global_step += 1
                 epoch_loss += loss.item()
+                with torch.no_grad():
+                    if model.n_classes == 1:
+                        prediction = torch.sigmoid(masks_pred.squeeze(1)) > 0.5
+                    else:
+                        prediction = masks_pred.argmax(dim=1) == 1
+                    target = true_masks == 1
+                    train_intersection += (prediction & target).sum().item()
+                    train_predicted_positive += prediction.sum().item()
+                    train_true_positive += target.sum().item()
                 experiment.log({
                     'train loss': loss.item(),
                     'step': global_step,
@@ -178,8 +193,20 @@ def train_model(
             if value.grad is not None and not (torch.isinf(value.grad) | torch.isnan(value.grad)).any():
                 histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
 
-        val_score = evaluate(model, val_loader, device, amp)
+        train_loss = epoch_loss / max(len(train_loader), 1)
+        train_dice = (2.0 * train_intersection + 1e-6) / (
+            train_predicted_positive + train_true_positive + 1e-6
+        )
+        val_metrics = evaluate(model, val_loader, device, amp, class_weights=class_weights)
+        val_score = val_metrics['dice']
         scheduler.step(val_score)
+
+        logging.info(
+            'Epoch %d/%d | train loss: %.4f | train Dice: %.4f | '
+            'val loss: %.4f | val Dice: %.4f | val precision: %.4f | val recall: %.4f',
+            epoch, epochs, train_loss, train_dice, val_metrics['loss'], val_score,
+            val_metrics['precision'], val_metrics['recall']
+        )
 
         if val_score > best_val_score + min_delta:
             best_val_score = val_score
@@ -193,7 +220,12 @@ def train_model(
         try:
             experiment.log({
                 'learning rate': optimizer.param_groups[0]['lr'],
+                'train loss (epoch)': train_loss,
+                'train Dice': train_dice,
+                'validation loss': val_metrics['loss'],
                 'validation Dice': val_score,
+                'validation precision': val_metrics['precision'],
+                'validation recall': val_metrics['recall'],
                 'step': global_step,
                 'epoch': epoch,
                 **histograms
