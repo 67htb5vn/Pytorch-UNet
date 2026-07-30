@@ -127,10 +127,14 @@ class BasicDataset(Dataset):
         return len(self.ids)
 
     @staticmethod
-    def preprocess(mask_values, pil_img, scale, is_mask):
+    def preprocess(mask_values, pil_img, scale, is_mask, target_size=None):
         w, h = pil_img.size
         newW, newH = int(scale * w), int(scale * h)
         assert newW > 0 and newH > 0, 'Scale is too small, resized images would have no pixel'
+
+        if target_size is not None:
+            newW, newH = target_size
+
         pil_img = pil_img.resize((newW, newH), resample=Image.NEAREST if is_mask else Image.BICUBIC)
         img = np.asarray(pil_img)
 
@@ -169,8 +173,9 @@ class BasicDataset(Dataset):
         assert img.size == mask.size, \
             f'Image and mask {name} should be the same size, but are {img.size} and {mask.size}'
 
-        img = self.preprocess(self.mask_values, img, self.scale, is_mask=False)
-        mask = self.preprocess(self.mask_values, mask, self.scale, is_mask=True)
+        target_size = (512, 512)
+        img = self.preprocess(self.mask_values, img, self.scale, is_mask=False, target_size=target_size)
+        mask = self.preprocess(self.mask_values, mask, self.scale, is_mask=True, target_size=target_size)
 
         return {
             'image': torch.as_tensor(img.copy()).float().contiguous(),
