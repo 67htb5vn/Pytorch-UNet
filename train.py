@@ -37,7 +37,7 @@ def train_model(
         weight_decay: float = 1e-8,
         momentum: float = 0.999,
         gradient_clipping: float = 1.0,
-        patience: int = 15,
+        patience: int = 5,
         min_delta: float = 1e-4,
 ):
     # 1. Create dataset
