@@ -139,6 +139,16 @@ class BasicDataset(Dataset):
         img = np.asarray(pil_img)
 
         if is_mask:
+            img_array = np.asarray(img)
+            if img_array.ndim == 2:
+                unique_values = np.unique(img_array)
+                if len(unique_values) == 2:
+                    foreground_value = unique_values.max()
+                    background_value = unique_values.min()
+                    mask = np.zeros((newH, newW), dtype=np.int64)
+                    mask[img_array == foreground_value] = 1
+                    return mask
+
             mask = np.zeros((newH, newW), dtype=np.int64)
             values_to_map = [int(v) for v in mask_values]
             if img.ndim == 2:
