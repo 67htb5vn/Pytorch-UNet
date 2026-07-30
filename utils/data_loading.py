@@ -140,7 +140,12 @@ class BasicDataset(Dataset):
 
         if is_mask:
             mask = np.zeros((newH, newW), dtype=np.int64)
-            for i, v in enumerate(mask_values):
+            values_to_map = [int(v) for v in mask_values]
+            if img.ndim == 2:
+                unique_values = np.unique(img)
+                if len(unique_values) == len(values_to_map) and len(values_to_map) == 2:
+                    values_to_map = [int(v) for v in unique_values]
+            for i, v in enumerate(values_to_map):
                 if img.ndim == 2:
                     mask[img == v] = i
                 else:
