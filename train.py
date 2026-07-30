@@ -29,7 +29,7 @@ def train_model(
         device,
         epochs: int = 5,
         batch_size: int = 1,
-        learning_rate: float = 1e-5,
+        learning_rate: float = 1e-4,
         val_percent: float = 0.1,
         save_checkpoint: bool = True,
         img_scale: float = 0.5,
@@ -39,6 +39,7 @@ def train_model(
         gradient_clipping: float = 1.0,
         patience: int = 5,
         min_delta: float = 1e-4,
+        foreground_weight: float = 0.0,
 ):
     # 1. Create dataset
     try:
@@ -54,7 +55,38 @@ def train_model(
     # 3. Create data loaders
     loader_args = dict(batch_size=batch_size, num_workers=0, pin_memory=True)
     train_loader = DataLoader(train_set, shuffle=True, **loader_args)
-    val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
+    # Do not silently discard validation images: for a small foreground this can
+    # noticeably change the Dice score.
+    val_loader = DataLoader(val_set, shuffle=False, drop_last=False, **loader_args)
+
+    # Medical masks are commonly dominated by background.  Estimate the class
+    # imbalance from a bounded, deterministic sample of the training set and
+    # use it in CE so that "predict background everywhere" is not a cheap
+    # solution.  A positive --foreground-weight overrides this estimate.
+    class_weights = None
+    if model.n_classes == 2:
+        sample_count = min(128, n_train)
+        sample_indices = torch.linspace(0, n_train - 1, steps=sample_count).long().tolist()
+        foreground_pixels = 0
+        total_pixels = 0
+        for index in sample_indices:
+            mask = train_set[index]['mask']
+            foreground_pixels += (mask == 1).sum().item()
+            total_pixels += mask.numel()
+
+        foreground_ratio = foreground_pixels / max(total_pixels, 1)
+        if foreground_pixels == 0:
+            raise RuntimeError(
+                'No foreground pixels were found in the training masks. '
+                'Check mask paths and values (for example 0/255 versus 0/1).'
+            )
+        auto_weight = min(50.0, max(1.0, (1.0 - foreground_ratio) / foreground_ratio))
+        fg_weight = foreground_weight if foreground_weight > 0 else auto_weight
+        class_weights = torch.tensor([1.0, fg_weight], device=device)
+        logging.info(
+            'Estimated foreground ratio: %.4f%%; foreground CE weight: %.2f',
+            foreground_ratio * 100, fg_weight
+        )
 
     # (Initialize logging)
     experiment = wandb.init(project='U-Net', resume='allow', anonymous='must')
@@ -79,8 +111,8 @@ def train_model(
     optimizer = optim.RMSprop(model.parameters(),
                               lr=learning_rate, weight_decay=weight_decay, momentum=momentum, foreach=True)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
-    grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
-    criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
+    grad_scaler = torch.amp.GradScaler(device.type, enabled=amp)
+    criterion = nn.CrossEntropyLoss(weight=class_weights) if model.n_classes > 1 else nn.BCEWithLogitsLoss()
     global_step = 0
     best_val_score = float('-inf')
     epochs_without_improvement = 0
@@ -109,10 +141,14 @@ def train_model(
                         loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float(), multiclass=False)
                     else:
                         loss = criterion(masks_pred, true_masks)
+                        # Match the validation metric: optimize foreground Dice,
+                        # rather than letting the abundant background dominate it.
+                        probabilities = F.softmax(masks_pred, dim=1).float()
+                        targets = F.one_hot(true_masks, model.n_classes).permute(0, 3, 1, 2).float()
                         loss += dice_loss(
-                            F.softmax(masks_pred, dim=1).float(),
-                            F.one_hot(true_masks, model.n_classes).permute(0, 3, 1, 2).float(),
-                            multiclass=True
+                            probabilities[:, 1:],
+                            targets[:, 1:],
+                            multiclass=False
                         )
 
                 optimizer.zero_grad(set_to_none=True)
@@ -193,8 +229,10 @@ def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=100, help='Number of epochs')
     parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=8, help='Batch size')
-    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
+    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-4,
                         help='Learning rate', dest='lr')
+    parser.add_argument('--foreground-weight', type=float, default=0.0,
+                        help='CE weight for foreground class; 0 estimates it from training masks')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
     parser.add_argument('--scale', '-s', type=float, default=0.25, help='Downscaling factor of the images')
     parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
@@ -240,7 +278,8 @@ if __name__ == '__main__':
             device=device,
             img_scale=args.scale,
             val_percent=args.val / 100,
-            amp=args.amp
+            amp=args.amp,
+            foreground_weight=args.foreground_weight
         )
     except torch.cuda.OutOfMemoryError:
         logging.error('Detected OutOfMemoryError! '
@@ -256,5 +295,6 @@ if __name__ == '__main__':
             device=device,
             img_scale=args.scale,
             val_percent=args.val / 100,
-            amp=args.amp
+            amp=args.amp,
+            foreground_weight=args.foreground_weight
         )
