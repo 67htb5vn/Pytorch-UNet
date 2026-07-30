@@ -21,7 +21,7 @@ from utils.dice_score import dice_loss
 
 dir_img = Path('/kaggle/input/datasets/nguyetanhmai/unet-train-medical/train_unet/images')
 dir_mask = Path('/kaggle/input/datasets/nguyetanhmai/unet-train-medical/train_unet/masks')
-dir_checkpoint = Path('./checkpoints/')
+dir_checkpoint = Path('/kaggle/working/checkpoints')
 
 
 def train_model(
@@ -37,6 +37,8 @@ def train_model(
         weight_decay: float = 1e-8,
         momentum: float = 0.999,
         gradient_clipping: float = 1.0,
+        patience: int = 15,
+        min_delta: float = 1e-4,
 ):
     # 1. Create dataset
     try:
@@ -80,6 +82,9 @@ def train_model(
     grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
     criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
     global_step = 0
+    best_val_score = float('-inf')
+    epochs_without_improvement = 0
+    best_state_dict = None
 
     # 5. Begin training
     for epoch in range(1, epochs + 1):
@@ -142,6 +147,14 @@ def train_model(
                         val_score = evaluate(model, val_loader, device, amp)
                         scheduler.step(val_score)
 
+                        if val_score > best_val_score + min_delta:
+                            best_val_score = val_score
+                            epochs_without_improvement = 0
+                            best_state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                            logging.info(f'New best validation Dice: {val_score:.4f}')
+                        else:
+                            epochs_without_improvement += 1
+
                         logging.info('Validation Dice score: {}'.format(val_score))
                         try:
                             experiment.log({
@@ -165,6 +178,24 @@ def train_model(
             state_dict['mask_values'] = dataset.mask_values
             torch.save(state_dict, str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
             logging.info(f'Checkpoint {epoch} saved!')
+
+            if best_state_dict is not None:
+                best_path = dir_checkpoint / 'best_model.pth'
+                torch.save({
+                    'model_state_dict': best_state_dict,
+                    'mask_values': dataset.mask_values,
+                    'best_val_score': best_val_score,
+                    'epoch': epoch,
+                }, str(best_path))
+                logging.info(f'Best model checkpoint saved to {best_path}')
+
+        if epochs_without_improvement >= patience:
+            logging.info(f'Early stopping triggered after {epoch} epochs without improvement.')
+            break
+
+    if best_state_dict is not None:
+        model.load_state_dict(best_state_dict)
+        logging.info(f'Loaded best model with validation Dice: {best_val_score:.4f}')
 
 
 def get_args():
