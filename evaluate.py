@@ -44,13 +44,18 @@ def evaluate(net, dataloader, device, amp, class_weights=None):
             true_positive += target_bool.sum().item()
 
     # Dataset-level (micro) Dice is stable even when some validation images have no lesion.
-    dice = (2.0 * intersection + 1e-6) / (predicted_positive + true_positive + 1e-6)
-    precision = (intersection + 1e-6) / (predicted_positive + 1e-6)
-    recall = (intersection + 1e-6) / (true_positive + 1e-6)
+    denominator = predicted_positive + true_positive
+    dice = 1.0 if denominator == 0 else 2.0 * intersection / denominator
+    # Do not use epsilon here: if no positive pixel was predicted, precision
+    # is not 1.0; reporting 0 makes the failure mode unambiguous.
+    precision = 0.0 if predicted_positive == 0 else intersection / predicted_positive
+    recall = 0.0 if true_positive == 0 else intersection / true_positive
     net.train()
     return {
         'loss': loss_sum / max(pixel_count, 1),
         'dice': dice,
         'precision': precision,
         'recall': recall,
+        'predicted_foreground_ratio': predicted_positive / max(pixel_count, 1),
+        'true_foreground_ratio': true_positive / max(pixel_count, 1),
     }

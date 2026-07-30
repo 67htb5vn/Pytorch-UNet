@@ -80,10 +80,12 @@ def train_model(
                 'No foreground pixels were found in the training masks. '
                 'Check mask paths and values (for example 0/255 versus 0/1).'
             )
-        # A full inverse-frequency weight (45.6 here) often over-predicts tiny
-        # structures.  The square-root weight is a less aggressive default;
-        # Dice loss still supplies a direct foreground-learning signal.
-        auto_weight = min(10.0, max(1.0, ((1.0 - foreground_ratio) / foreground_ratio) ** 0.5))
+        # Full inverse-frequency weighting (45.6 here) is frequently too
+        # aggressive, but sqrt weighting (6.75) can be too weak to make the
+        # first foreground predictions.  This tempered inverse-frequency
+        # weight is a practical middle ground for sparse medical masks.
+        imbalance = (1.0 - foreground_ratio) / foreground_ratio
+        auto_weight = min(25.0, max(2.0, imbalance ** 0.75))
         fg_weight = foreground_weight if foreground_weight > 0 else auto_weight
         class_weights = torch.tensor([1.0, fg_weight], device=device)
         logging.info(
@@ -203,9 +205,12 @@ def train_model(
 
         logging.info(
             'Epoch %d/%d | train loss: %.4f | train Dice: %.4f | '
-            'val loss: %.4f | val Dice: %.4f | val precision: %.4f | val recall: %.4f',
+            'val loss: %.4f | val Dice: %.4f | val precision: %.4f | val recall: %.4f | '
+            'val fg (pred/true): %.3f%%/%.3f%%',
             epoch, epochs, train_loss, train_dice, val_metrics['loss'], val_score,
-            val_metrics['precision'], val_metrics['recall']
+            val_metrics['precision'], val_metrics['recall'],
+            val_metrics['predicted_foreground_ratio'] * 100,
+            val_metrics['true_foreground_ratio'] * 100,
         )
 
         if val_score > best_val_score + min_delta:
@@ -226,6 +231,8 @@ def train_model(
                 'validation Dice': val_score,
                 'validation precision': val_metrics['precision'],
                 'validation recall': val_metrics['recall'],
+                'validation predicted foreground ratio': val_metrics['predicted_foreground_ratio'],
+                'validation true foreground ratio': val_metrics['true_foreground_ratio'],
                 'step': global_step,
                 'epoch': epoch,
                 **histograms
