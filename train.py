@@ -40,9 +40,9 @@ def train_model(
 ):
     # 1. Create dataset
     try:
-        dataset = CarvanaDataset(dir_img, dir_mask, img_scale)
+        dataset = CarvanaDataset(dir_img, dir_mask, img_scale, mask_values=[0, 1], scan_limit=5)
     except (AssertionError, RuntimeError, IndexError):
-        dataset = BasicDataset(dir_img, dir_mask, img_scale)
+        dataset = BasicDataset(dir_img, dir_mask, img_scale, mask_values=[0, 1], scan_limit=5)
 
     # 2. Split into train / validation partitions
     n_val = int(len(dataset) * val_percent)

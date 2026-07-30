@@ -13,6 +13,14 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 
+def _normalize_mask_values(mask_values):
+    if mask_values is None:
+        return None
+    if isinstance(mask_values, (list, tuple, np.ndarray)):
+        return [int(v) for v in list(mask_values)]
+    return [int(mask_values)]
+
+
 def load_image(filename):
     ext = splitext(filename)[1]
     if ext == '.npy':
@@ -36,7 +44,8 @@ def unique_mask_values(idx, mask_dir, mask_suffix):
 
 
 class BasicDataset(Dataset):
-    def __init__(self, images_dir: str, mask_dir: str, scale: float = 1.0, mask_suffix: str = ''):
+    def __init__(self, images_dir: str, mask_dir: str, scale: float = 1.0, mask_suffix: str = '',
+                 mask_values: list = None, scan_limit: int = None):
         self.images_dir = Path(images_dir)
         self.mask_dir = Path(mask_dir)
         assert 0 < scale <= 1, 'Scale must be between 0 and 1'
@@ -47,19 +56,22 @@ class BasicDataset(Dataset):
         if not self.ids:
             raise RuntimeError(f'No input file found in {images_dir}, make sure you put your images there')
 
-        logging.info(f'Creating dataset with {len(self.ids)} examples')
-        logging.info('Scanning mask files to determine unique values')
-        unique = []
-        for idx in tqdm(self.ids):
-            unique.append(
-            unique_mask_values(
-            idx,
-            self.mask_dir,
-            self.mask_suffix
-        )
-    )
+        self.mask_values = _normalize_mask_values(mask_values)
 
-        self.mask_values = list(sorted(np.unique(np.concatenate(unique), axis=0).tolist()))
+        logging.info(f'Creating dataset with {len(self.ids)} examples')
+        if self.mask_values is not None:
+            logging.info('Using provided mask values without scanning masks')
+        else:
+            logging.info('Scanning mask files to determine unique values')
+            unique = []
+            for idx in tqdm(self.ids[:scan_limit] if scan_limit is not None else self.ids):
+                unique.append(unique_mask_values(idx, self.mask_dir, self.mask_suffix))
+
+            if not unique:
+                self.mask_values = []
+            else:
+                self.mask_values = list(sorted(np.unique(np.concatenate(unique), axis=0).tolist()))
+
         logging.info(f'Unique mask values: {self.mask_values}')
 
     def __len__(self):
@@ -117,5 +129,6 @@ class BasicDataset(Dataset):
 
 
 class CarvanaDataset(BasicDataset):
-    def __init__(self, images_dir, mask_dir, scale=1):
-        super().__init__(images_dir, mask_dir, scale, mask_suffix='_mask')
+    def __init__(self, images_dir, mask_dir, scale=1, mask_values=None, scan_limit=None):
+        super().__init__(images_dir, mask_dir, scale, mask_suffix='_mask', mask_values=mask_values,
+                         scan_limit=scan_limit)
