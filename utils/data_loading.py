@@ -43,6 +43,32 @@ def unique_mask_values(idx, mask_dir, mask_suffix):
         raise ValueError(f'Loaded masks should have 2 or 3 dimensions, found {mask.ndim}')
 
 
+def find_matching_mask(mask_dir, image_name, mask_suffix):
+    if not mask_dir.exists():
+        return None
+
+    candidates = []
+    for path in mask_dir.iterdir():
+        if not path.is_file() or path.name.startswith('.'):
+            continue
+        stem = path.stem
+        if stem == image_name or stem == f'{image_name}{mask_suffix}' or stem == f'{image_name}_mask':
+            candidates.append(path)
+        elif mask_suffix and stem.replace(mask_suffix, '') == image_name:
+            candidates.append(path)
+
+    if not candidates:
+        return None
+
+    preferred_names = [image_name, f'{image_name}{mask_suffix}', f'{image_name}_mask']
+    for preferred_name in preferred_names:
+        for path in candidates:
+            if path.stem == preferred_name:
+                return path
+
+    return sorted(candidates)[0]
+
+
 class BasicDataset(Dataset):
     def __init__(self, images_dir: str, mask_dir: str, scale: float = 1.0, mask_suffix: str = '',
                  mask_values: list = None, scan_limit: int = None):
@@ -52,9 +78,29 @@ class BasicDataset(Dataset):
         self.scale = scale
         self.mask_suffix = mask_suffix
 
-        self.ids = [splitext(file)[0] for file in listdir(images_dir) if isfile(join(images_dir, file)) and not file.startswith('.')]
-        if not self.ids:
+        image_files = []
+        for file in sorted(self.images_dir.iterdir()):
+            if file.is_file() and not file.name.startswith('.'):
+                image_files.append(file)
+
+        if not image_files:
             raise RuntimeError(f'No input file found in {images_dir}, make sure you put your images there')
+
+        self.image_files_by_id = {}
+        self.mask_files_by_id = {}
+        self.ids = []
+        for image_file in image_files:
+            image_id = splitext(image_file.name)[0]
+            mask_file = find_matching_mask(self.mask_dir, image_id, self.mask_suffix)
+            if mask_file is None:
+                logging.warning(f'Skipping {image_file.name}: no matching mask found')
+                continue
+            self.image_files_by_id[image_id] = image_file
+            self.mask_files_by_id[image_id] = mask_file
+            self.ids.append(image_id)
+
+        if not self.ids:
+            raise RuntimeError(f'No valid image-mask pairs found in {images_dir} and {mask_dir}')
 
         self.mask_values = _normalize_mask_values(mask_values)
 
@@ -108,13 +154,14 @@ class BasicDataset(Dataset):
 
     def __getitem__(self, idx):
         name = self.ids[idx]
-        mask_file = list(self.mask_dir.glob(name + self.mask_suffix + '.*'))
-        img_file = list(self.images_dir.glob(name + '.*'))
+        img_file = self.image_files_by_id.get(name)
+        mask_file = self.mask_files_by_id.get(name)
 
-        assert len(img_file) == 1, f'Either no image or multiple images found for the ID {name}: {img_file}'
-        assert len(mask_file) == 1, f'Either no mask or multiple masks found for the ID {name}: {mask_file}'
-        mask = load_image(mask_file[0])
-        img = load_image(img_file[0])
+        if img_file is None or mask_file is None:
+            raise FileNotFoundError(f'No valid image/mask pair found for the ID {name}')
+
+        mask = load_image(mask_file)
+        img = load_image(img_file)
 
         assert img.size == mask.size, \
             f'Image and mask {name} should be the same size, but are {img.size} and {mask.size}'
