@@ -1,6 +1,19 @@
 """ Full assembly of the parts to form the complete network """
 
+import torch
 from .unet_parts import *
+
+
+class CheckpointWrapper(nn.Module):
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, *args, **kwargs):
+        def run(*inner_args, **inner_kwargs):
+            return self.module(*inner_args, **inner_kwargs)
+
+        return torch.utils.checkpoint(run, *args, use_reentrant=False, **kwargs)
 
 
 class UNet(nn.Module):
@@ -36,13 +49,13 @@ class UNet(nn.Module):
         return logits
 
     def use_checkpointing(self):
-        self.inc = torch.utils.checkpoint(self.inc)
-        self.down1 = torch.utils.checkpoint(self.down1)
-        self.down2 = torch.utils.checkpoint(self.down2)
-        self.down3 = torch.utils.checkpoint(self.down3)
-        self.down4 = torch.utils.checkpoint(self.down4)
-        self.up1 = torch.utils.checkpoint(self.up1)
-        self.up2 = torch.utils.checkpoint(self.up2)
-        self.up3 = torch.utils.checkpoint(self.up3)
-        self.up4 = torch.utils.checkpoint(self.up4)
-        self.outc = torch.utils.checkpoint(self.outc)
+        self.inc = CheckpointWrapper(self.inc)
+        self.down1 = CheckpointWrapper(self.down1)
+        self.down2 = CheckpointWrapper(self.down2)
+        self.down3 = CheckpointWrapper(self.down3)
+        self.down4 = CheckpointWrapper(self.down4)
+        self.up1 = CheckpointWrapper(self.up1)
+        self.up2 = CheckpointWrapper(self.up2)
+        self.up3 = CheckpointWrapper(self.up3)
+        self.up4 = CheckpointWrapper(self.up4)
+        self.outc = CheckpointWrapper(self.outc)
